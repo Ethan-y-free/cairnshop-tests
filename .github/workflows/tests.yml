@@ -1,0 +1,151 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  api-ui:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: cairnshop
+          MYSQL_USER: cairnshop
+          MYSQL_PASSWORD: cairnshop
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      CAIRNSHOP_MYSQL_HOST: 127.0.0.1
+      CAIRNSHOP_MYSQL_PORT: "3306"
+      CAIRNSHOP_MYSQL_USER: cairnshop
+      CAIRNSHOP_MYSQL_PASSWORD: cairnshop
+      CAIRNSHOP_MYSQL_DATABASE: cairnshop
+      CAIRNSHOP_CAIRNKV_ADDRS: 127.0.0.1:6666,127.0.0.1:6667,127.0.0.1:6668
+      CAIRNSHOP_TEST_BASE_URL: http://127.0.0.1:8080
+      CAIRNSHOP_TEST_UI_URL: http://127.0.0.1:5173
+      CAIRNSHOP_TEST_ADMIN_EMAIL: admin@cairnshop.local
+      CAIRNSHOP_TEST_ADMIN_PASSWORD: admin123456
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Ethan-y-Free/CairnShop
+          path: cairnshop
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Ethan-y-Free/CairnKV
+          path: cairnkv
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake \
+            libmysqlclient-dev libssl-dev libgtest-dev librocksdb-dev
+
+      - name: Build CairnKV
+        run: |
+          cmake -S cairnkv -B cairnkv/build -DCMAKE_BUILD_TYPE=Release \
+            -DCAIRNKV_BUILD_TESTS=OFF \
+            -DCAIRNKV_BUILD_BENCH=OFF \
+            -DCAIRNKV_BUILD_EXAMPLES=OFF \
+            -DCAIRNKV_BUILD_TOOLS=OFF
+          cmake --build cairnkv/build -j"$(nproc)"
+
+      - name: Start CairnKV cluster
+        run: |
+          cd cairnkv
+          BIN="$PWD/build/cairnkd" ./scripts/run-cluster.sh
+          sleep 3
+
+      - name: Build CairnShop
+        run: |
+          cmake -S cairnshop -B cairnshop/build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build cairnshop/build -j"$(nproc)"
+
+      - name: Migrate and seed
+        working-directory: cairnshop
+        run: |
+          ./build/backend/cairnshop-backend migrate
+          ./build/backend/cairnshop-backend seed
+          for _ in $(seq 1 30); do
+            if ./build/backend/cairnshop-backend seed-config; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "seed-config failed" >&2
+          exit 1
+
+      - name: Start backend
+        working-directory: cairnshop
+        run: |
+          nohup ./build/backend/cairnshop-backend serve > /tmp/cairnshop.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/cairnshop.log
+          exit 1
+
+      - name: Start frontend
+        working-directory: cairnshop/frontend
+        run: |
+          npm install --no-audit --no-fund
+          nohup npm run dev -- --host 127.0.0.1 --port 5173 \
+            > /tmp/frontend.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:5173/ >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/frontend.log
+          exit 1
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,ui]"
+          python -m playwright install --with-deps chromium
+
+      - name: Run API tests
+        run: pytest tests/api -m "api" -q
+
+      - name: Run UI smoke
+        run: pytest tests/ui -m "ui" -q
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results
+          path: reports/allure-results
+          if-no-files-found: ignore
+
+      - name: Show backend log on failure
+        if: failure()
+        run: cat /tmp/cairnshop.log || true
