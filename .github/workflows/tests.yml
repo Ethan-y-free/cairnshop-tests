@@ -76,8 +76,16 @@ jobs:
       - name: Start CairnKV cluster
         run: |
           cd cairnkv
-          BIN="$PWD/build/cairnkd" ./scripts/run-cluster.sh
+          # run-cluster.sh 在 git 里是 100644，没有可执行位；显式用 bash 调用。
+          BIN="$PWD/build/cairnkd" bash scripts/run-cluster.sh
           sleep 3
+          for port in 6666 6667 6668; do
+            if ! (echo > "/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+              echo "CairnKV port $port is not listening" >&2
+              cat /tmp/cairnkv-cluster/node-*.log || true
+              exit 1
+            fi
+          done
 
       - name: Build CairnShop
         run: |
