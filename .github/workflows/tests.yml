@@ -60,9 +60,12 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          # 用 MariaDB 客户端开发包代替 libmysqlclient-dev：
+          # runner 预装 mysql-server，libmysqlclient-dev 会触发 mysql-server
+          # 升级并导致 postinst 失败；CairnShop 的 CMake 同时支持 mariadb。
+          sudo apt-get install -y --no-install-recommends \
             build-essential cmake \
-            libmysqlclient-dev libssl-dev libgtest-dev librocksdb-dev
+            libmariadb-dev libssl-dev libgtest-dev librocksdb-dev
 
       - name: Build CairnKV
         run: |
